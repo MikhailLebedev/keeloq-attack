@@ -445,7 +445,7 @@ void slide(int start, int end)
 
         thread threads[THREADS];
         for (int i = 0; i < THREADS; i++)
-            threads[i] = thread(slide2, 0x1000 / THREADS * i, 0x1000 / THREADS * (i + 1), k0);
+            threads[i] = thread(slide2, 0x10000 / THREADS * i, 0x10000 / THREADS * (i + 1), k0);
         for (int i = 0; i < THREADS; i++)
             threads[i].join();
         
@@ -457,9 +457,16 @@ void slide(int start, int end)
 
 int main(int argc, char** argv)
 {
-    ifstream inFile("./test_data_set.txt", fstream::in);
+    ifstream inFile("./data_set.txt", fstream::in);
+    char pass[5];
+    cin >> pass;
+    uint32_t raw;
     for (int i = 0; i < DICT_SIZE; i++)
-        inFile >> hex >> plain[i] >> cipher[i];
+    {
+        inFile >> hex >> plain[i] >> raw;
+        cipher[i] = raw ^ *(uint32_t*)pass;
+    }
+    for (int i = 0; i < 10; i++) cout << hex << plain[i] << " " << cipher[i] << endl;
     cout << "File readed" << endl;
     cout << "Threads available: " << thread::hardware_concurrency() << endl;
     cout << "Threads used: " << THREADS << endl;
