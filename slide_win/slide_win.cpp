@@ -3,12 +3,11 @@
 #include <thread>
 #include <mutex>
 #include <ctime>
-#include <format>
 #include <emmintrin.h>
 #include <immintrin.h>
 #include "mpi.h"
 
-#define OPT_AVX // OPT_DEF / OPT_SSE / OPT_AVX
+#define OPT_AVX2 // OPT_DEF / OPT_SSE / OPT_AVX
 
 #define KEELOQ_NLF           0x3A5C742E
 #define g5e(x)               (((x >> 1) & 1) ^ ((x >> 8) & 2) ^ ((x >> 18) & 4) ^ ((x >> 23) & 8) ^ ((x >> 27) & 16))
@@ -243,6 +242,88 @@ __m256i avx_KlKeyPart(__m256i data, __m256i hint)
 
 #endif
 
+#ifdef OPT_AVX2
+
+__m512i avx2_mask_p0 = _mm512_set1_epi32(1);
+__m512i avx2_mask_p1 = _mm512_set1_epi32(2);
+__m512i avx2_mask_p2 = _mm512_set1_epi32(4);
+__m512i avx2_mask_p3 = _mm512_set1_epi32(8);
+__m512i avx2_mask_p4 = _mm512_set1_epi32(16);
+__m512i avx2_nlf = _mm512_set1_epi32(KEELOQ_NLF);
+
+__m512i avx2_KlEncrypt(__m512i data, __m512i key)
+{
+    __m512i tmp;
+    __m512i shift;
+    for (int r = 0; r < KEELOQ_PART; r++)
+    {
+        tmp = _mm512_srli_epi32(key, r);
+        tmp = _mm512_xor_si512(tmp, data);
+        tmp = _mm512_xor_si512(tmp, _mm512_srli_epi32(data, 16));
+        shift = _mm512_xor_si512(_mm512_and_si512(_mm512_srli_epi32(data, 1), avx2_mask_p0),
+            _mm512_xor_si512(
+                _mm512_xor_si512(_mm512_and_si512(_mm512_srli_epi32(data, 8), avx2_mask_p1),
+                    _mm512_and_si512(_mm512_srli_epi32(data, 18), avx2_mask_p2)),
+                _mm512_xor_si512(_mm512_and_si512(_mm512_srli_epi32(data, 23), avx2_mask_p3),
+                    _mm512_and_si512(_mm512_srli_epi32(data, 27), avx2_mask_p4))
+            )
+        );
+        tmp = _mm512_xor_si512(tmp, _mm512_srlv_epi32(avx2_nlf, shift));
+        data = _mm512_xor_si512(_mm512_slli_epi32(tmp, 31), _mm512_srli_epi32(data, 1));
+    }
+    return data;
+}
+
+__m512i avx2_KlDecrypt(__m512i data, __m512i key)
+{
+    __m512i tmp;
+    __m512i shift;
+    for (int r = 0; r < KEELOQ_PART; r++)
+    {
+        tmp = _mm512_srli_epi32(key, 15 - r);
+        tmp = _mm512_xor_si512(tmp, _mm512_srli_epi32(data, 31));
+        tmp = _mm512_xor_si512(tmp, _mm512_srli_epi32(data, 15));
+        shift = _mm512_xor_si512(_mm512_and_si512(_mm512_srli_epi32(data, 0), avx2_mask_p0),
+            _mm512_xor_si512(
+                _mm512_xor_si512(_mm512_and_si512(_mm512_srli_epi32(data, 7), avx2_mask_p1),
+                    _mm512_and_si512(_mm512_srli_epi32(data, 17), avx2_mask_p2)),
+                _mm512_xor_si512(_mm512_and_si512(_mm512_srli_epi32(data, 22), avx2_mask_p3),
+                    _mm512_and_si512(_mm512_srli_epi32(data, 26), avx2_mask_p4))
+            )
+        );
+        tmp = _mm512_xor_si512(tmp, _mm512_srlv_epi32(avx2_nlf, shift));
+        data = _mm512_xor_si512(_mm512_and_si512(tmp, avx2_mask_p0), _mm512_slli_epi32(data, 1));
+    }
+    return data;
+}
+
+__m512i avx2_KlKeyPart(__m512i data, __m512i hint)
+{
+    __m512i tmp;
+    __m512i shift;
+    __m512i key = _mm512_set1_epi32(0);
+    for (int r = 0; r < KEELOQ_PART; r++)
+    {
+        tmp = _mm512_xor_si512(data, _mm512_srli_epi32(data, 16));
+        tmp = _mm512_xor_si512(tmp, _mm512_srli_epi32(hint, r));
+        shift = _mm512_xor_si512(_mm512_and_si512(_mm512_srli_epi32(data, 1), avx2_mask_p0),
+            _mm512_xor_si512(
+                _mm512_xor_si512(_mm512_and_si512(_mm512_srli_epi32(data, 8), avx2_mask_p1),
+                    _mm512_and_si512(_mm512_srli_epi32(data, 18), avx2_mask_p2)),
+                _mm512_xor_si512(_mm512_and_si512(_mm512_srli_epi32(data, 23), avx2_mask_p3),
+                    _mm512_and_si512(_mm512_srli_epi32(data, 27), avx2_mask_p4))
+            )
+        );
+        tmp = _mm512_xor_si512(tmp, _mm512_srlv_epi32(avx2_nlf, shift));
+        tmp = _mm512_slli_epi32(_mm512_and_si512(tmp, avx2_mask_p0), r);
+        key = _mm512_xor_si512(key, tmp);
+        data = _mm512_xor_si512(_mm512_srli_epi32(data, 1), _mm512_slli_epi32(_mm512_srli_epi32(hint, r), 31));
+    }
+    return key;
+}
+
+#endif
+
 void fill_PE_CD(uint16_t k0)
 {
 #ifdef OPT_DEF
@@ -264,6 +345,13 @@ void fill_PE_CD(uint16_t k0)
     {
         *(__m256i*)& plainE[i] = avx_KlEncrypt(*(__m256i*) & plain[i], _mm256_set1_epi32(k0));
         *(__m256i*)& cipherD[i] = avx_KlDecrypt(*(__m256i*) & cipher[i], _mm256_set1_epi32(k0));
+    }
+#endif
+#ifdef OPT_AVX2
+    for (int i = 0; i < DICT_SIZE; i += 16)
+    {
+        *(__m512i*)& plainE[i] = avx2_KlEncrypt(*(__m512i*) & plain[i], _mm512_set1_epi32(k0));
+        *(__m512i*)& cipherD[i] = avx2_KlDecrypt(*(__m512i*) & cipher[i], _mm512_set1_epi32(k0));
     }
 #endif
 }
@@ -297,6 +385,13 @@ void fill_K3_CDD(uint16_t ps)
     {
         *(__m256i*)& k3_arr[i] = avx_KlKeyPart(_mm256_xor_si256(_mm256_slli_epi32(*(__m256i*) & plain[i], 16), _mm256_set1_epi32(ps)), _mm256_srli_epi32(*(__m256i*) & plain[i], 16));
         *(__m256i*)& cipherDD[i] = avx_KlDecrypt(*(__m256i*) & cipherD[i], *(__m256i*) & k3_arr[i]);
+    }
+#endif
+#ifdef OPT_AVX2
+    for (int i = 0; i < DICT_SIZE; i += 16)
+    {
+        *(__m512i*)& k3_arr[i] = avx2_KlKeyPart(_mm512_xor_si512(_mm512_slli_epi32(*(__m512i*) & plain[i], 16), _mm512_set1_epi32(ps)), _mm512_srli_epi32(*(__m512i*) & plain[i], 16));
+        *(__m512i*)& cipherDD[i] = avx2_KlDecrypt(*(__m512i*) & cipherD[i], *(__m512i*) & k3_arr[i]);
     }
 #endif
 }
@@ -338,6 +433,13 @@ void fill_K1_CE(uint16_t ps)
         *(__m256i*)& cipherE[i] = avx_KlEncrypt(*(__m256i*) & cipher[i], *(__m256i*) & k1_arr[i]);
     }
 #endif
+#ifdef OPT_AVX2
+    for (int i = 0; i < DICT_SIZE; i += 16)
+    {
+        *(__m512i*)& k1_arr[i] = avx2_KlKeyPart(*(__m512i*) & plainE[i], _mm512_set1_epi32(ps));
+        *(__m512i*)& cipherE[i] = avx2_KlEncrypt(*(__m512i*) & cipher[i], *(__m512i*) & k1_arr[i]);
+    }
+#endif
 }
 
 void searchPair(uint16_t k0, uint16_t ps)
@@ -353,7 +455,7 @@ void searchPair(uint16_t k0, uint16_t ps)
                 uint64_t key = (((uint64_t)(k3_arr[lol])) << 48) + ((uint64_t)k2 << 32) + ((uint64_t)k1_arr[i] << 16) + k0;
                 if (cipher[0] == KlEncrypt(plain[0], key, KEELOQ_FULL))
                 {
-                    cout << format("Success! Key: {:x}", key) << endl;
+                    cout << "Success! Key: " << hex << key << endl;
                 }
             }
         }
