@@ -504,10 +504,12 @@ void searchPair(uint16_t k0, uint16_t ps)
 {
     for (int i = 0; i < DICT_SIZE; i++)
     {
-        uint16_t searchValue = cipherE[i] >> 16;
-        for (int k = 1; k <= table[searchValue][0]; k++)
+        const uint16_t searchValue = cipherE[i] >> 16;
+        const uint16_t* ptr = &table[searchValue][0];
+        const int amt = ptr[0] & 0xFF;
+        for (int k = 1; k <= amt; k++)
         {
-            int j = table[searchValue][k % TABLE_ROW_SIZE];
+            int j = ptr[k];
             uint16_t k2;
             if (KlLastKeyPart(plainEE[i], plain[j], cipherE[i], cipherD[j], &k2))
             {
@@ -540,7 +542,7 @@ int main(int argc, char** argv)
     {
         startTime = MPI_Wtime();
         fillPeCd(k0);
-        for (uint32_t ps = 0x10000 / size * rank; ps < 0x10000 / size * (rank + 1); ps++)
+        for (uint32_t ps = 0x1000 / size * rank; ps < 0x1000 / size * (rank + 1); ps++)
         {
             fillK3CddK1CePee(ps);
             zeroTable();
