@@ -7,31 +7,37 @@
 #include <immintrin.h>
 #include "mpi.h"
 
-#define OPT_AVX2 // OPT_DEF / OPT_SSE / OPT_AVX
+#define OPT_AVX // OPT_DEF / OPT_SSE / OPT_AVX
 
 #define KEELOQ_NLF           0x3A5C742E
 #define g5e(x)               (((x >> 1) & 1) ^ ((x >> 8) & 2) ^ ((x >> 18) & 4) ^ ((x >> 23) & 8) ^ ((x >> 27) & 16))
 #define g5d(x)               (((x >> 0) & 1) ^ ((x >> 7) & 2) ^ ((x >> 17) & 4) ^ ((x >> 22) & 8) ^ ((x >> 26) & 16))
-#define DICT_SIZE            0x10000 // 2^16 65536
-#define TABLE_SIZE           0x10000 // 2^16 65536
+#define DICT_SIZE            0x10000 // 2^16 65536 plaintext/ciphertext pairs
+#define TABLE_SIZE           0x10000 // 2^16 65536 - search collision size 16bit
 #define TABLE_ROW_SIZE       16
 #define KEELOQ_PART          16 // part encrypt/decrypt by 16bits of key
 #define KEELOQ_FULL          528 // full encrypt/decrypt
 
 using namespace std;
 
+/*
+cipher[i] = Encrypt(plain[i])
+cipher[j] = Encrypt(plain[j])
+
+         k0        k1            k2          k3          k0
+plain[i] -> plainE    -> plainEE -- plainD   <- plain[j]
+            cipher[i] -> cipherE -- cipherDD <- cipherD  <- cipher[j]
+*/
+
 uint32_t plain[DICT_SIZE];
 uint32_t cipher[DICT_SIZE];
-
-uint32_t plainE[DICT_SIZE]; // encrypt by k0
-uint32_t cipherD[DICT_SIZE]; // decrypt by k0
-
+uint32_t plainE[DICT_SIZE];   // encrypt by k0 from plain
+uint32_t cipherD[DICT_SIZE];  // decrypt by k0 from cipher
 uint32_t k1_arr[DICT_SIZE];
-uint32_t cipherE[DICT_SIZE]; // encrypt by k1
-
+uint32_t cipherE[DICT_SIZE];  // encrypt by k1 from cipher
 uint32_t k3_arr[DICT_SIZE];
-uint32_t cipherDD[DICT_SIZE]; // decrypt by k3
-
+uint32_t cipherDD[DICT_SIZE]; // decrypt by k3 from cipherD
+uint32_t plainEE[DICT_SIZE];  // encrypt by k1 from plainE
 uint16_t table[TABLE_SIZE][TABLE_ROW_SIZE];
 
 uint32_t KlEncrypt(uint32_t data, uint64_t key, int rounds)
@@ -324,7 +330,7 @@ __m512i avx2_KlKeyPart(__m512i data, __m512i hint)
 
 #endif
 
-void fill_PE_CD(uint16_t k0)
+void fillPeCd(uint32_t k0)
 {
 #ifdef OPT_DEF
     for (int i = 0; i < DICT_SIZE; i += 1)
@@ -356,15 +362,7 @@ void fill_PE_CD(uint16_t k0)
 #endif
 }
 
-void zeroTable()
-{
-    for (int i = 0; i < TABLE_SIZE; i++)
-    {
-        table[i][0] = 0;
-    }
-}
-
-void fill_K3_CDD(uint16_t ps)
+void fillK3Cdd(uint32_t ps)
 {
 #ifdef OPT_DEF
     for (int i = 0; i < DICT_SIZE; i += 1)
@@ -396,21 +394,7 @@ void fill_K3_CDD(uint16_t ps)
 #endif
 }
 
-void fillTable()
-{
-    for (int i = 0; i < DICT_SIZE; i++)
-    {
-        uint16_t lo = cipherDD[i] & 0xFFFF;
-        table[lo][(table[lo][0] % (TABLE_ROW_SIZE - 1)) + 1] = i;
-        table[lo][0]++;
-        if (table[lo][0] >= TABLE_ROW_SIZE)
-        {
-            cout << "Mem" << endl;
-        }
-    }
-}
-
-void fill_K1_CE(uint16_t ps)
+void fillK1Ce(uint32_t ps)
 {
 #ifdef OPT_DEF
     for (int i = 0; i < DICT_SIZE; i += 1)
@@ -442,18 +426,93 @@ void fill_K1_CE(uint16_t ps)
 #endif
 }
 
+void fillK3CddK1CePee(uint32_t ps)
+{
+#ifdef OPT_DEF
+    for (int i = 0; i < DICT_SIZE; i += 1)
+    {
+        k3_arr[i] = KlKeyPart((plain[i] << 16) ^ ps, (uint16_t)(plain[i] >> 16));
+        cipherDD[i] = KlDecrypt(cipherD[i], k3_arr[i], KEELOQ_PART);
+        k1_arr[i] = KlKeyPart(plainE[i], ps);
+        cipherE[i] = KlEncrypt(cipher[i], k1_arr[i], KEELOQ_PART);
+        plainEE[i] = (plainE[i] >> 16) ^ (ps << 16);
+    }
+#endif
+#ifdef OPT_SSE
+    for (int i = 0; i < DICT_SIZE; i += 4)
+    {
+        *(__m128i*)& k3_arr[i] = sse_KlKeyPart(_mm_xor_si128(_mm_slli_epi32(*(__m128i*) & plain[i], 16), _mm_set1_epi32(ps)), _mm_srli_epi32(*(__m128i*) & plain[i], 16));
+        *(__m128i*)& cipherDD[i] = sse_KlDecrypt(*(__m128i*) & cipherD[i], *(__m128i*) & k3_arr[i]);
+        *(__m128i*)& k1_arr[i] = sse_KlKeyPart(*(__m128i*) & plainE[i], _mm_set1_epi32(ps));
+        *(__m128i*)& cipherE[i] = sse_KlEncrypt(*(__m128i*) & cipher[i], *(__m128i*) & k1_arr[i]);
+        *(__m128i*)& plainEE[i] = _mm128_xor_si128(_mm128_srli_epi32(*(__m128i*) & plainE[i], 16), _mm128_slli_epi32(_mm128_set1_epi32(ps), 16));
+    }
+#endif 
+#ifdef OPT_AVX
+    for (int i = 0; i < DICT_SIZE; i += 8)
+    {
+        *(__m256i*)& k3_arr[i] = avx_KlKeyPart(_mm256_xor_si256(_mm256_slli_epi32(*(__m256i*) & plain[i], 16), _mm256_set1_epi32(ps)), _mm256_srli_epi32(*(__m256i*) & plain[i], 16));
+        *(__m256i*)& cipherDD[i] = avx_KlDecrypt(*(__m256i*) & cipherD[i], *(__m256i*) & k3_arr[i]);
+        *(__m256i*)& k1_arr[i] = avx_KlKeyPart(*(__m256i*) & plainE[i], _mm256_set1_epi32(ps));
+        *(__m256i*)& cipherE[i] = avx_KlEncrypt(*(__m256i*) & cipher[i], *(__m256i*) & k1_arr[i]);
+        *(__m256i*)& plainEE[i] = _mm256_xor_si256(_mm256_srli_epi32(*(__m256i*) & plainE[i], 16), _mm256_slli_epi32(_mm256_set1_epi32(ps), 16));
+    }
+#endif
+#ifdef OPT_AVX2
+    for (int i = 0; i < DICT_SIZE; i += 16)
+    {
+        *(__m512i*)&k3_arr[i] = avx2_KlKeyPart(_mm512_xor_si512(_mm512_slli_epi32(*(__m512i*)&plain[i], 16), _mm512_set1_epi32(ps)), _mm512_srli_epi32(*(__m512i*)&plain[i], 16));
+        *(__m512i*)&cipherDD[i] = avx2_KlDecrypt(*(__m512i*)&cipherD[i], *(__m512i*)&k3_arr[i]);
+        *(__m512i*)&k1_arr[i] = avx2_KlKeyPart(*(__m512i*)&plainE[i], _mm512_set1_epi32(ps));
+        *(__m512i*)&cipherE[i] = avx2_KlEncrypt(*(__m512i*)&cipher[i], *(__m512i*)&k1_arr[i]);
+        *(__m512i*)& plainEE[i] = _mm512_xor_si512(_mm512_srli_epi32(*(__m512i*) & plainE[i], 16), _mm512_slli_epi32(_mm512_set1_epi32(ps), 16));
+
+    }
+#endif
+}
+
+void zeroTable()
+{
+    for (int i = 0; i < TABLE_SIZE; i++)
+    {
+        table[i][0] = 0;
+    }
+}
+
+void fillTable()
+{
+    for (int i = 0; i < DICT_SIZE; i++)
+    {
+        uint16_t lo = cipherDD[i] & 0xFFFF;
+        table[lo][(table[lo][0] % (TABLE_ROW_SIZE - 1)) + 1] = i;
+        table[lo][0]++;
+        if (table[lo][0] >= TABLE_ROW_SIZE)
+        {
+            cout << "Mem" << endl;
+        }
+    }
+}
+
+bool finalCheck(uint64_t key)
+{
+    if (cipher[0] == KlEncrypt(plain[0], key, KEELOQ_FULL))
+        return true;
+    return false;
+}
+
 void searchPair(uint16_t k0, uint16_t ps)
 {
     for (int i = 0; i < DICT_SIZE; i++)
     {
-        for (int j = 1; j <= table[cipherE[i] >> 16][0]; j++)
+        uint16_t searchValue = cipherE[i] >> 16;
+        for (int k = 1; k <= table[searchValue][0]; k++)
         {
-            uint16_t lol = table[cipherE[i] >> 16][j % TABLE_ROW_SIZE];
+            int j = table[searchValue][k % TABLE_ROW_SIZE];
             uint16_t k2;
-            if (KlLastKeyPart((plainE[i] >> 16) ^ ((uint32_t)ps << 16), (uint16_t)plain[lol], cipherE[i], (uint16_t)(cipherDD[lol] >> 16), &k2))
+            if (KlLastKeyPart(plainEE[i], plain[j], cipherE[i], cipherD[j], &k2))
             {
-                uint64_t key = (((uint64_t)(k3_arr[lol])) << 48) + ((uint64_t)k2 << 32) + ((uint64_t)k1_arr[i] << 16) + k0;
-                if (cipher[0] == KlEncrypt(plain[0], key, KEELOQ_FULL))
+                uint64_t key = (((uint64_t)k3_arr[j]) << 48) ^ ((uint64_t)k2 << 32) ^ ((uint64_t)k1_arr[i] << 16) ^ k0;
+                if (finalCheck(key))
                 {
                     cout << "Success! Key: " << hex << key << endl;
                 }
@@ -462,37 +521,11 @@ void searchPair(uint16_t k0, uint16_t ps)
     }
 }
 
-void slide(int rank, int size)
-{
-    for (int i = 0; i < 1; i++)
-    {
-        uint16_t k0 = (uint16_t)i;
-        cout << "Process: " << rank << ", k0: " << hex << k0 << endl;
-        fill_PE_CD(k0);
-        for (int j = 0x1000 / size * rank; j < 0x1000 / size * (rank + 1); j++)
-        {
-            uint16_t ps = (uint16_t)j;
-            zeroTable();
-            fill_K3_CDD(ps);
-            fillTable();
-            fill_K1_CE(ps);
-            searchPair(k0, ps);
-        }
-    }
-}
-
 int main(int argc, char** argv)
 {
     ifstream inFile("./test_data_set.txt", fstream::in);
-    char pass[5] = "\x00\x00\x00\x00";
-    uint32_t raw;
     for (int i = 0; i < DICT_SIZE; i++)
-    {
-        inFile >> hex >> plain[i] >> raw;
-        cipher[i] = raw ^ *(uint32_t*)pass;
-    }
-    //for (int i = 0; i < 10; i++) cout << hex << plain[i] << " " << cipher[i] << endl;
-    //cout << "File readed" << endl;
+        inFile >> hex >> plain[i] >> cipher[i];
 
     int rank, size;
     MPI_Init(&argc, &argv);
@@ -500,10 +533,23 @@ int main(int argc, char** argv)
     MPI_Comm_size(MPI_COMM_WORLD, &size);
     
     double startTime, endTime;
-    startTime = MPI_Wtime();
-    slide(rank, size);
-    endTime = MPI_Wtime();
-    cout << "Process: " << rank << ", time: " << endTime - startTime << endl;
+    int start = stoi(argv[1], nullptr, 16);
+    int end = stoi(argv[2], nullptr, 16);
+
+    for (uint32_t k0 = start; k0 < end; k0++)
+    {
+        startTime = MPI_Wtime();
+        fillPeCd(k0);
+        for (uint32_t ps = 0x10000 / size * rank; ps < 0x10000 / size * (rank + 1); ps++)
+        {
+            fillK3CddK1CePee(ps);
+            zeroTable();
+            fillTable();
+            searchPair(k0, ps);
+        }
+        endTime = MPI_Wtime();
+        cout << "Process: " << rank << ", k0: " << hex << k0 << dec << ", time: " << endTime - startTime << endl;
+    }
     MPI_Finalize();
 
     return 0;
